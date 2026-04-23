@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -89,36 +90,82 @@ func getFileName(resp *http.Response) (string, error) {
 	}
 
 	_, params, err := mime.ParseMediaType(disposition)
-	if err != nil {
+	if err == nil {
+		if fileName := fileNameFromParams(params); fileName != "" {
+			return sanitizeFileName(fileName), nil
+		}
+	}
+
+	fileName := fileNameFromDisposition(disposition)
+	if fileName == "" && err != nil {
 		return "", fmt.Errorf("解析Content-Disposition失败: %w", err)
 	}
-
-	var fileName string
-
-	// 优先使用UTF-8编码的文件名
-	if name := params["filename*"]; name != "" {
-		if strings.Contains(name, "''") {
-			parts := strings.SplitN(name, "''", 2)
-			if decoded, err := url.QueryUnescape(parts[1]); err == nil {
-				fileName = decoded
-			}
-		}
-	}
-
-	// 使用普通文件名
-	if fileName == "" {
-		if name := params["filename"]; name != "" {
-			fileName = strings.Trim(name, `"`)
-		}
-	}
-
 	if fileName == "" {
 		return "", fmt.Errorf("无法从响应头中提取文件名")
 	}
 
+	return sanitizeFileName(fileName), nil
+}
+
+func fileNameFromParams(params map[string]string) string {
+	// 优先使用UTF-8编码的文件名
+	if name := params["filename*"]; name != "" {
+		if fileName := decodeRFC5987Value(name); fileName != "" {
+			return fileName
+		}
+	}
+
+	// Go 标准库有时会将 filename* 直接归一化到 filename。
+	if name := params["filename"]; name != "" {
+		return strings.Trim(name, `"`)
+	}
+
+	return ""
+}
+
+func fileNameFromDisposition(disposition string) string {
+	if name := findHeaderParam(disposition, "filename*"); name != "" {
+		if fileName := decodeRFC5987Value(name); fileName != "" {
+			return fileName
+		}
+	}
+
+	if name := findHeaderParam(disposition, "filename"); name != "" {
+		return strings.Trim(name, `"`)
+	}
+
+	return ""
+}
+
+func findHeaderParam(disposition, key string) string {
+	pattern := regexp.MustCompile(`(?i)(?:^|;)\s*` + regexp.QuoteMeta(key) + `=([^;]+)`)
+	matches := pattern.FindStringSubmatch(disposition)
+	if len(matches) < 2 {
+		return ""
+	}
+
+	return strings.TrimSpace(matches[1])
+}
+
+func decodeRFC5987Value(value string) string {
+	value = strings.Trim(value, `"`)
+	if strings.Contains(value, "''") {
+		parts := strings.SplitN(value, "''", 2)
+		value = parts[1]
+	}
+
+	decoded, err := url.QueryUnescape(value)
+	if err != nil {
+		return ""
+	}
+
+	return decoded
+}
+
+func sanitizeFileName(fileName string) string {
 	// 替换文件名中的路径分隔符，防止创建文件时出错
 	fileName = strings.ReplaceAll(fileName, "/", "_")
 	fileName = strings.ReplaceAll(fileName, "\\", "_")
 
-	return fileName, nil
+	return fileName
 }
